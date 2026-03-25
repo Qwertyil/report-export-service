@@ -1,0 +1,32 @@
+[project]
+name = "report-export-service"
+version = "0.1.0"
+description = "Async report export service for large text files."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Amir Zambatov", email = "zamnatov2004@gmail.com" }]
+dependencies = [
+    "fastapi>=0.116.1,<0.117.0",
+    "pydantic>=2.11.0,<3.0.0",
+    "uvicorn[standard]>=0.35.0,<0.36.0",
+    "celery>=5.5.3,<6.0.0",
+    "redis>=6.4.0,<7.0.0",
+    "pydantic-settings>=2.11.0,<3.0.0",
+    "python-multipart>=0.0.20,<0.0.21",
+    "pymorphy3>=2.0.4,<3.0.0",
+    "openpyxl>=3.1.5,<4.0.0",
+]
+
+[tool.poetry]
+packages = [{ include = "app" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.2"
+httpx = "^0.28.1"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
