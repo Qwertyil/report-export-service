@@ -49,3 +49,28 @@ def test_step1_fixed_mvp_contract_constants() -> None:
 
     with pytest.raises(ValueError, match="Unknown MVP error_code"):
         validate_mvp_error_code("unexpected_error")
+
+
+def test_export_openapi_requires_multipart_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+
+    try:
+        schema = create_app().openapi()
+    finally:
+        get_settings.cache_clear()
+
+    operation = schema["paths"]["/public/report/export"]["post"]
+    assert operation["requestBody"]["required"] is True
+
+    body_ref = operation["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
+    body_name = body_ref.rsplit("/", maxsplit=1)[-1]
+    body_schema = schema["components"]["schemas"][body_name]
+
+    assert body_schema["type"] == "object"
+    assert body_schema["required"] == ["file"]
+    assert body_schema["properties"]["file"] == {
+        "title": "File",
+        "type": "string",
+        "format": "binary",
+    }

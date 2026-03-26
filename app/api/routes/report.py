@@ -1,9 +1,11 @@
+import shutil
 import uuid
 from pathlib import Path
 from typing import cast
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.api.schemas.report import (
     ExportSubmitResponse,
@@ -14,9 +16,76 @@ from app.api.schemas.report import (
 from app.api.schemas.report import JobStatus as ResponseJobStatus
 from app.core.settings import get_settings
 from app.domain.report.job_repository import JobStatus
+from app.infrastructure.celery_app import enqueue_report_job
 from app.infrastructure.job_repository import get_job_repository
 
 router = APIRouter(prefix="/report", tags=["report"])
+
+
+def _best_effort_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+async def _best_effort_unlink_async(path: Path) -> None:
+    try:
+        await run_in_threadpool(path.unlink, missing_ok=True)
+    except OSError:
+        pass
+
+
+async def _best_effort_rmtree_async(path: Path) -> None:
+    try:
+        await run_in_threadpool(shutil.rmtree, str(path), True)
+    except OSError:
+        pass
+
+
+def _accepted_submit_response(job_id: str, *, submit_status: JobStatus = JobStatus.queued) -> ExportSubmitResponse:
+    settings = get_settings()
+    return ExportSubmitResponse(
+        job_id=job_id,
+        status=cast(ResponseJobStatus, submit_status.value),
+        status_url=f"{settings.api_prefix}/report/{job_id}/status",
+        download_url=f"{settings.api_prefix}/report/{job_id}/download",
+    )
+
+
+async def _persist_upload(upload: UploadFile, destination: Path, max_size_bytes: int, chunk_size: int) -> None:
+    bytes_written = 0
+    output = None
+    cleanup_path = False
+
+    try:
+        output = await run_in_threadpool(destination.open, "wb")
+        while True:
+            chunk = await upload.read(chunk_size)
+            if not chunk:
+                break
+
+            bytes_written += len(chunk)
+            if bytes_written > max_size_bytes:
+                cleanup_path = True
+                raise HTTPException(
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    detail="payload too large",
+                )
+
+            await run_in_threadpool(output.write, chunk)
+    except Exception:
+        cleanup_path = True
+        raise
+    finally:
+        if output is not None:
+            await run_in_threadpool(output.close)
+        if cleanup_path:
+            await _best_effort_unlink_async(destination)
+
+
+def _job_dir(shared_jobs_root: str, job_id: str) -> Path:
+    return Path(shared_jobs_root) / job_id
 
 
 @router.post(
@@ -24,26 +93,65 @@ router = APIRouter(prefix="/report", tags=["report"])
     status_code=status.HTTP_202_ACCEPTED,
     response_model=ExportSubmitResponse,
 )
-async def export_report(file: UploadFile = File(...)) -> ExportSubmitResponse:
-    # Step 1 contract: async submit that returns immediately with job identifiers.
+async def export_report(file: UploadFile | None = File(None)) -> ExportSubmitResponse:
     if file is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file is required")
 
     settings = get_settings()
     job_id = str(uuid.uuid4())
+    job_dir = _job_dir(settings.shared_jobs_root, job_id)
+    input_path = job_dir / "input"
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        await _persist_upload(
+            file,
+            input_path,
+            max_size_bytes=settings.max_upload_size_bytes,
+            chunk_size=settings.read_chunk_size,
+        )
+    except Exception:
+        # Upload failed before any durable job row exists: remove partial input and job dir.
+        await _best_effort_rmtree_async(job_dir)
+        raise
+    finally:
+        await file.close()
 
     repo = get_job_repository()
-    repo.create_queued_job(job_id)
 
-    status_url = f"{settings.api_prefix}/report/{job_id}/status"
-    download_url = f"{settings.api_prefix}/report/{job_id}/download"
+    try:
+        repo.create_queued_job(job_id)
+    except Exception:
+        _best_effort_unlink(input_path)
+        raise
 
-    return ExportSubmitResponse(
-        job_id=job_id,
-        status="queued",
-        status_url=status_url,
-        download_url=download_url,
-    )
+    try:
+        enqueue_report_job(job_id)
+    except Exception:
+        failed_job = repo.mark_queued_job_failed(
+            job_id,
+            error_code="queue_unavailable",
+            error_message="queue is unavailable",
+        )
+        if failed_job is not None:
+            _best_effort_unlink(input_path)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="queue unavailable",
+            ) from None
+        # Broker may have accepted the task before the client saw an error; if the
+        # job is no longer queued (e.g. a worker claimed it), return job_id so the
+        # client can poll instead of a 500 with no id.
+        existing = repo.get_job(job_id)
+        if existing is not None:
+            return _accepted_submit_response(job_id, submit_status=existing.status)
+        _best_effort_unlink(input_path)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="job state transition failed",
+        ) from None
+
+    return _accepted_submit_response(job_id)
 
 
 @router.get("/{job_id}/status", response_model=JobStatusResponse)

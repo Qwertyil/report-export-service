@@ -42,6 +42,14 @@ class JobRepository(Protocol):
 
     def claim_queued_job(self, job_id: str) -> Job | None: ...
 
+    def mark_queued_job_failed(
+        self,
+        job_id: str,
+        *,
+        error_code: str,
+        error_message: str | None = None,
+    ) -> Job | None: ...
+
     def mark_job_done(self, job_id: str, *, line_count: int, unique_lemma_count: int) -> Job | None: ...
 
     def mark_job_failed(

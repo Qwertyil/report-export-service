@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.domain.report.job_repository import JobStatus
 from app.infrastructure.job_repository import JOBS_DB_FILENAME, SqliteJobRepository
 
@@ -26,6 +28,14 @@ def test_create_queued_job_persists_across_repository_instances(tmp_path: Path) 
     assert reloaded_job.stats_path == str(tmp_path / "job-1" / "stats.sqlite")
     assert reloaded_job.output_path == str(tmp_path / "job-1" / "report.xlsx")
     assert (tmp_path / JOBS_DB_FILENAME).is_file()
+
+
+def test_create_queued_job_rejects_duplicate_job_id(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    repo.create_queued_job("dup")
+
+    with pytest.raises(ValueError, match="job already exists: dup"):
+        repo.create_queued_job("dup")
 
 
 def test_claim_queued_job_has_single_winner(tmp_path: Path) -> None:
@@ -86,3 +96,24 @@ def test_mark_job_failed_requires_processing_status(tmp_path: Path) -> None:
     assert failed_job.lease_expires_at is None
     assert failed_job.error_code == "queue_unavailable"
     assert failed_job.error_message == "queue is unavailable"
+
+
+def test_mark_queued_job_failed_requires_queued_status(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    repo.create_queued_job("job-submit-failed")
+
+    failed_job = repo.mark_queued_job_failed(
+        "job-submit-failed",
+        error_code="queue_unavailable",
+        error_message="queue is unavailable",
+    )
+
+    assert failed_job is not None
+    assert failed_job.status == JobStatus.failed
+    assert failed_job.started_at is None
+    assert failed_job.finished_at is not None
+    assert failed_job.lease_expires_at is None
+    assert failed_job.error_code == "queue_unavailable"
+    assert failed_job.error_message == "queue is unavailable"
+
+    assert repo.mark_queued_job_failed("job-submit-failed", error_code="queue_unavailable") is None

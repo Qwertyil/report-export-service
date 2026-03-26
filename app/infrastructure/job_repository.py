@@ -246,6 +246,45 @@ class SqliteJobRepository(JobRepository):
                 return None
             return self._fetch_job(connection, job_id)
 
+    def mark_queued_job_failed(
+        self,
+        job_id: str,
+        *,
+        error_code: str,
+        error_message: str | None = None,
+    ) -> Job | None:
+        now = _utcnow()
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET
+                    status = ?,
+                    updated_at = ?,
+                    finished_at = ?,
+                    started_at = NULL,
+                    lease_expires_at = NULL,
+                    line_count = NULL,
+                    unique_lemma_count = NULL,
+                    error_code = ?,
+                    error_message = ?
+                WHERE job_id = ? AND status = ?
+                """,
+                (
+                    JobStatus.failed.value,
+                    now.isoformat(),
+                    now.isoformat(),
+                    error_code,
+                    error_message,
+                    job_id,
+                    JobStatus.queued.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            return self._fetch_job(connection, job_id)
+
     def mark_job_failed(
         self,
         job_id: str,
