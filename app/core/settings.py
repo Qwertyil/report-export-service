@@ -22,7 +22,6 @@ class Settings(BaseSettings):
     celery_broker_url: str | None = None
     celery_result_backend: str | None = None
 
-    # MVP settings (Step 1 contract).
     shared_jobs_root: str = "/tmp/report-export-shared-jobs"
     max_upload_size_bytes: int = 50 * 1024 * 1024
 

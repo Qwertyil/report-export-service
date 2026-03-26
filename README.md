@@ -1,99 +1,122 @@
 # Report Export Service
 
-Сервис для асинхронной обработки больших текстовых файлов и экспорта статистики по леммам в `xlsx`.
+Service for asynchronous processing of large text files and exporting lemma statistics to `xlsx`.
+
+## Quick Start
+
+The easiest way to start the whole service:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+The API will be available at `http://localhost:8000`, and the OpenAPI UI at `http://localhost:8000/docs`.
+
+For local process-based runs you will need:
+
+- Python `3.12`
+- Poetry
+- Redis
+
+Install dependencies:
+
+```bash
+poetry install
+```
 
 ## MVP Contract
 
 ### `POST /public/report/export`
 
-- принимает `multipart/form-data` с полем `file`;
-- сохраняет upload в `shared_jobs_root/<job_id>/input` с прикладной проверкой размера;
-- создает job в persistent `job_repository`;
-- публикует задачу в очередь;
-- возвращает `202 Accepted` с `job_id`, `status`, `status_url`, `download_url`.
+- accepts `multipart/form-data` with a `file` field;
+- saves the upload to `shared_jobs_root/<job_id>/input` with application-level size validation;
+- creates a job in the persistent `job_repository`;
+- publishes a task to the queue;
+- returns `202 Accepted` with `job_id`, `status`, `status_url`, `download_url`.
 
-Возможные ошибки:
+Possible errors:
 
-- `400` если `file` не передан;
-- `413` если размер upload превышает `max_upload_size_bytes` (partial input удаляется);
-- `503` если публикация в очередь не удалась (job переводится в `failed`, input удаляется best-effort).
+- `400` if `file` is missing;
+- `413` if the upload size exceeds `max_upload_size_bytes` (partial input is deleted);
+- `503` if publishing to the queue fails (the job is moved to `failed`, input is deleted on a best-effort basis).
 
 ### `GET /public/report/{job_id}/status`
 
-- читает состояние только из `job_repository`;
-- возвращает `queued | processing | done | failed`;
-- для `done` возвращает `download_url`;
-- для `failed` возвращает `{ error_code, error_message }`;
-- возвращает `404`, если job не существует.
+- reads status only from `job_repository`;
+- returns `queued | processing | done | failed`;
+- for `done`, returns `download_url`;
+- for `failed`, returns `{ error_code, error_message }`;
+- returns `404` if the job does not exist.
 
 Repair-check:
 
-- если в metadata job указано `done`, но артефакт отсутствует, job ремонтно переводится в `failed` с `error_code = artifact_missing`.
+- if the job metadata says `done` but the artifact is missing, the job is repair-transitioned to `failed` with `error_code = artifact_missing`.
 
 ### `GET /public/report/{job_id}/download`
 
-- возвращает `200` и `xlsx` только для `done`;
-- возвращает `409` для `queued`, `processing` и `failed`;
-- возвращает `404` для неизвестного `job_id`;
-- использует тот же repair-check `artifact_missing`, что и `/status`.
+- returns `200` and the `xlsx` file only for `done`;
+- returns `409` for `queued`, `processing`, and `failed`;
+- returns `404` for an unknown `job_id`;
+- uses the same `artifact_missing` repair-check as `/status`.
 
 ## Processing Rules
 
 ### Encodings
 
-Worker пробует декодировать файл строго в порядке:
+The worker tries to decode the file strictly in this order:
 
 1. `UTF-8-SIG`
 2. `UTF-8`
 3. `CP1251`
 
-Если ни одна кодировка не подходит, job завершается как `failed` с `error_code = unsupported_encoding`.
-Если в успешно декодированном тексте встречается `\x00`, job также завершается как `unsupported_encoding`.
+If none of the encodings work, the job finishes as `failed` with `error_code = unsupported_encoding`.
+If `\x00` appears in successfully decoded text, the job also finishes as `unsupported_encoding`.
 
 ### Tokenization
 
-- токен = непрерывная последовательность букв;
-- цифры не считаются токенами;
-- дефис разбивает токены;
-- пунктуация и прочий шум игнорируются;
-- регистр приводится к нижнему;
-- `ё` нормализуется к `е`;
-- латиница поддерживается как обычные токены;
-- пустые строки учитываются в `line_count`;
-- последняя строка учитывается даже без завершающего `\n`.
+- a token is a continuous sequence of letters;
+- digits are not considered tokens;
+- a hyphen splits tokens;
+- punctuation and other noise are ignored;
+- text is lowercased;
+- `ё` is normalized to `е`;
+- Latin letters are supported as regular tokens;
+- empty lines are included in `line_count`;
+- the last line is counted even without a trailing `\n`.
 
 ### Normalization
 
-- для токенов с кириллицей используется `pymorphy3`;
-- для токенов без кириллицы возвращается lowercase token;
-- используется bounded LRU-кэш.
+- `pymorphy3` is used for tokens containing Cyrillic;
+- for tokens without Cyrillic, the lowercase token is returned;
+- a bounded LRU cache is used.
 
 ## XLSX Output
 
-Формируется один worksheet с header row:
+A single worksheet is generated with this header row:
 
 - `lemma`
 - `total_count`
 - `counts_per_line`
 
-`counts_per_line` содержит значения для всех строк от `1` до `line_count`, включая нули.
+`counts_per_line` contains values for all lines from `1` to `line_count`, including zeros.
 
 ## MVP Limits
 
-- максимальная длина текста в ячейке: `xlsx_cell_char_limit` (по умолчанию `32767`);
-- максимальное число data rows: `xlsx_max_data_rows` (по умолчанию `1_048_575`);
-- fail-fast по числу строк: если `line_count > 16_384`, job завершается с `xlsx_cell_limit`;
-- если `unique_lemma_count > xlsx_max_data_rows`, job завершается с `xlsx_row_limit`.
+- maximum cell text length: `xlsx_cell_char_limit` (default: `32767`);
+- maximum number of data rows: `xlsx_max_data_rows` (default: `1_048_575`);
+- fail-fast on line count: if `line_count > 16_384`, the job fails with `xlsx_cell_limit`;
+- if `unique_lemma_count > xlsx_max_data_rows`, the job fails with `xlsx_row_limit`.
 
 ## Source Of Truth
 
-- публичный статус job всегда читается из `job_repository`;
-- `Celery`/`AsyncResult` не используется как источник пользовательского статуса;
-- `api` и `worker` должны видеть один и тот же `shared_jobs_root` по одному и тому же абсолютному пути.
+- public job status is always read from `job_repository`;
+- `Celery`/`AsyncResult` is not used as the source of user-visible status;
+- `api` and `worker` must see the same `shared_jobs_root` at the same absolute path.
 
 ## Error Codes
 
-Фиксированный список MVP `error_code`:
+Fixed MVP `error_code` list:
 
 - `queue_unavailable`
 - `unsupported_encoding`
@@ -104,8 +127,11 @@ Worker пробует декодировать файл строго в поря
 
 ## Configuration
 
-Переменные окружения с префиксом `REPORT_EXPORT_`:
+Environment variables with the `REPORT_EXPORT_` prefix:
 
+- `REDIS_URL` (default: `redis://localhost:6379/0`)
+- `CELERY_BROKER_URL` (optional, defaults to `REDIS_URL`)
+- `CELERY_RESULT_BACKEND` (optional, defaults to `REDIS_URL`)
 - `SHARED_JOBS_ROOT` (default: `/tmp/report-export-shared-jobs`)
 - `MAX_UPLOAD_SIZE_BYTES` (default: `50 * 1024 * 1024`)
 - `READ_CHUNK_SIZE` (default: `1_048_576`)
@@ -115,24 +141,35 @@ Worker пробует декодировать файл строго в поря
 - `XLSX_CELL_CHAR_LIMIT` (default: `32767`)
 - `XLSX_MAX_DATA_ROWS` (default: `1_048_575`)
 
-Создайте локальный env-файл из шаблона:
+Create a local env file from the template:
 
 ```bash
 cp .env.example .env
 ```
 
-`docker compose` автоматически подхватит `.env` из корня проекта.
+`docker compose` will automatically load `.env` from the project root.
+
+`.env.example` is intended for container-based runs and uses `REPORT_EXPORT_REDIS_URL=redis://redis:6379/0`.
+For local host-based `uvicorn` and `celery` runs, replace that value with a reachable Redis address, for example:
+
+```env
+REPORT_EXPORT_REDIS_URL=redis://localhost:6379/0
+```
 
 ## Local Run
 
+Make sure Redis is already running and reachable via `REPORT_EXPORT_REDIS_URL`.
+
+API:
+
 ```bash
-uvicorn app.main:app --reload
+poetry run uvicorn app.main:app --reload
 ```
 
 Worker:
 
 ```bash
-celery -A app.infrastructure.celery_app worker --loglevel=info
+poetry run celery -A app.infrastructure.celery_app worker --loglevel=info
 ```
 
 ## Run In Containers
@@ -173,7 +210,51 @@ make docker-logs
 make docker-down
 ```
 
+## Example Flow
+
+Submit file:
+
+```bash
+curl -F "file=@sample.txt" http://localhost:8000/public/report/export
+```
+
+Example response:
+
+```json
+{
+  "job_id": "7b4a4cb2-7d60-4d33-b2be-cfd4d9c8af2e",
+  "status": "queued",
+  "status_url": "/public/report/7b4a4cb2-7d60-4d33-b2be-cfd4d9c8af2e/status",
+  "download_url": "/public/report/7b4a4cb2-7d60-4d33-b2be-cfd4d9c8af2e/download"
+}
+```
+
+Check status:
+
+```bash
+curl http://localhost:8000/public/report/<job_id>/status
+```
+
+Download result when status becomes `done`:
+
+```bash
+curl -OJ http://localhost:8000/public/report/<job_id>/download
+```
+
 ## Tests
 
 - unit: tokenizer, normalizer, streaming aggregation, `job_repository`, sqlite stats storage, xlsx writer;
 - integration: submit/status/download contract, oversized upload (`413`), queue publish failure (`503`), full async flow, controlled processing failures, `404` unknown job, `409` download before completion.
+
+Run tests:
+
+```bash
+poetry run pytest
+```
+
+Or via Make targets:
+
+```bash
+make test
+make check
+```
