@@ -15,7 +15,7 @@ from app.api.schemas.report import (
 )
 from app.api.schemas.report import JobStatus as ResponseJobStatus
 from app.core.settings import get_settings
-from app.domain.report.job_repository import JobStatus
+from app.domain.report.job_repository import Job, JobRepository, JobStatus
 from app.infrastructure.celery_app import enqueue_report_job
 from app.infrastructure.job_repository import get_job_repository
 
@@ -88,6 +88,38 @@ def _job_dir(shared_jobs_root: str, job_id: str) -> Path:
     return Path(shared_jobs_root) / job_id
 
 
+def _done_job_output_exists(job: Job) -> bool:
+    if job.output_path is None:
+        return False
+    return Path(job.output_path).is_file()
+
+
+def _repair_done_job_missing_artifact(repo: JobRepository, job: Job) -> Job:
+    repaired_job = repo.repair_artifact_missing(
+        job.job_id,
+        error_message="report artifact is missing",
+    )
+    if repaired_job is not None:
+        return repaired_job
+
+    refreshed_job = repo.get_job(job.job_id)
+    if refreshed_job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_id not found")
+    return refreshed_job
+
+
+def _get_job_for_public_read(job_id: str) -> Job:
+    repo = get_job_repository()
+    job = repo.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_id not found")
+
+    if job.status != JobStatus.done or _done_job_output_exists(job):
+        return job
+
+    return _repair_done_job_missing_artifact(repo, job)
+
+
 @router.post(
     "/export",
     status_code=status.HTTP_202_ACCEPTED,
@@ -156,10 +188,7 @@ async def export_report(file: UploadFile | None = File(None)) -> ExportSubmitRes
 
 @router.get("/{job_id}/status", response_model=JobStatusResponse)
 async def get_report_status(job_id: str) -> JobStatusResponse:
-    repo = get_job_repository()
-    job = repo.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_id not found")
+    job = _get_job_for_public_read(job_id)
 
     settings = get_settings()
     download_url = f"{settings.api_prefix}/report/{job_id}/download"
@@ -201,19 +230,15 @@ async def get_report_status(job_id: str) -> JobStatusResponse:
 @router.get("/{job_id}/download")
 async def download_report(job_id: str) -> FileResponse:
     repo = get_job_repository()
-    job = repo.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_id not found")
+    job = _get_job_for_public_read(job_id)
 
     if job.status != JobStatus.done:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="job is not ready for download")
 
-    if job.output_path is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact missing")
-
     output_path = Path(job.output_path)
-    if not output_path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact missing")
+    if not output_path.is_file():
+        _repair_done_job_missing_artifact(repo, job)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="job is not ready for download")
 
     return FileResponse(
         str(output_path),

@@ -325,6 +325,43 @@ class SqliteJobRepository(JobRepository):
                 return None
             return self._fetch_job(connection, job_id)
 
+    def repair_artifact_missing(
+        self,
+        job_id: str,
+        *,
+        error_message: str | None = None,
+    ) -> Job | None:
+        now = _utcnow()
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs
+                SET
+                    status = ?,
+                    updated_at = ?,
+                    finished_at = ?,
+                    lease_expires_at = NULL,
+                    line_count = NULL,
+                    unique_lemma_count = NULL,
+                    error_code = ?,
+                    error_message = ?
+                WHERE job_id = ? AND status = ?
+                """,
+                (
+                    JobStatus.failed.value,
+                    now.isoformat(),
+                    now.isoformat(),
+                    "artifact_missing",
+                    error_message,
+                    job_id,
+                    JobStatus.done.value,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            return self._fetch_job(connection, job_id)
+
     def get_job(self, job_id: str) -> Job | None:
         with self._connect() as connection:
             return self._fetch_job(connection, job_id)

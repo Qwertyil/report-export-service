@@ -148,6 +148,66 @@ def test_download_returns_file_for_done_job(client: TestClient) -> None:
     )
 
 
+def test_status_repairs_done_job_when_output_artifact_is_missing(client: TestClient) -> None:
+    repo = _repo()
+    job = repo.create_queued_job("job-missing-status")
+    claimed_job = repo.claim_queued_job(job.job_id)
+    assert claimed_job is not None
+
+    done_job = repo.mark_job_done(
+        job.job_id,
+        line_count=1,
+        unique_lemma_count=1,
+    )
+    assert done_job is not None
+    assert job.output_path is not None
+    assert not Path(job.output_path).exists()
+
+    response = client.get(f"/public/report/{job.job_id}/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "job_id": job.job_id,
+        "status": "failed",
+        "download_url": None,
+        "error": {
+            "error_code": "artifact_missing",
+            "error_message": "report artifact is missing",
+        },
+    }
+
+    repaired_job = repo.get_job(job.job_id)
+    assert repaired_job is not None
+    assert repaired_job.status == JobStatus.failed
+    assert repaired_job.error_code == "artifact_missing"
+
+
+def test_download_repairs_done_job_when_output_artifact_is_missing(client: TestClient) -> None:
+    repo = _repo()
+    job = repo.create_queued_job("job-missing-download")
+    claimed_job = repo.claim_queued_job(job.job_id)
+    assert claimed_job is not None
+
+    done_job = repo.mark_job_done(
+        job.job_id,
+        line_count=1,
+        unique_lemma_count=1,
+    )
+    assert done_job is not None
+    assert job.output_path is not None
+    assert not Path(job.output_path).exists()
+
+    response = client.get(f"/public/report/{job.job_id}/download")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "job is not ready for download"}
+
+    repaired_job = repo.get_job(job.job_id)
+    assert repaired_job is not None
+    assert repaired_job.status == JobStatus.failed
+    assert repaired_job.error_code == "artifact_missing"
+
+
 def test_unknown_job_returns_404_for_status_and_download(client: TestClient) -> None:
     status_response = client.get("/public/report/missing/status")
     download_response = client.get("/public/report/missing/download")

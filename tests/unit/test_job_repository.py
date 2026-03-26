@@ -103,6 +103,32 @@ def test_mark_job_failed_requires_processing_status(tmp_path: Path) -> None:
     assert failed_job.error_message == "queue is unavailable"
 
 
+def test_repair_artifact_missing_requires_done_status(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    repo.create_queued_job("job-artifact-missing")
+
+    assert repo.repair_artifact_missing("job-artifact-missing") is None
+
+    repo.claim_queued_job("job-artifact-missing")
+    assert repo.repair_artifact_missing("job-artifact-missing") is None
+
+    done_job = repo.mark_job_done("job-artifact-missing", line_count=10, unique_lemma_count=3)
+    assert done_job is not None
+
+    failed_job = repo.repair_artifact_missing(
+        "job-artifact-missing",
+        error_message="report artifact is missing",
+    )
+
+    assert failed_job is not None
+    assert failed_job.status == JobStatus.failed
+    assert failed_job.finished_at is not None
+    assert failed_job.line_count is None
+    assert failed_job.unique_lemma_count is None
+    assert failed_job.error_code == "artifact_missing"
+    assert failed_job.error_message == "report artifact is missing"
+
+
 def test_mark_queued_job_failed_requires_queued_status(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     repo.create_queued_job("job-submit-failed")

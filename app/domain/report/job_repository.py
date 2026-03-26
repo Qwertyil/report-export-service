@@ -60,4 +60,11 @@ class JobRepository(Protocol):
         error_message: str | None = None,
     ) -> Job | None: ...
 
+    def repair_artifact_missing(
+        self,
+        job_id: str,
+        *,
+        error_message: str | None = None,
+    ) -> Job | None: ...
+
     def get_job(self, job_id: str) -> Job | None: ...
