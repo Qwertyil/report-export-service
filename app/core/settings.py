@@ -45,6 +45,20 @@ class Settings(BaseSettings):
             raise ValueError("shared_jobs_root must be an absolute path")
         return str(path)
 
+    @field_validator(
+        "read_chunk_size",
+        "normalizer_cache_size",
+        "stats_batch_size",
+        "processing_timeout_seconds",
+        "xlsx_max_data_rows",
+    )
+    @classmethod
+    def validate_positive_runtime_settings(cls, value: int, info: object) -> int:
+        if value < 1:
+            field_name = getattr(info, "field_name", "value")
+            raise ValueError(f"{field_name} must be positive")
+        return value
+
     @property
     def effective_celery_broker_url(self) -> str:
         return self.celery_broker_url or self.redis_url

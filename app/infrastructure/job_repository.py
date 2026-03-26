@@ -20,6 +20,8 @@ class SqliteJobRepository(JobRepository):
     """Persistent job repository backed by SQLite in the shared jobs root."""
 
     def __init__(self, shared_jobs_root: str, processing_timeout_seconds: int):
+        if processing_timeout_seconds < 1:
+            raise ValueError("processing_timeout_seconds must be positive")
         self._shared_jobs_root = Path(shared_jobs_root)
         self._processing_timeout_seconds = processing_timeout_seconds
         self._database_path = self._shared_jobs_root / JOBS_DB_FILENAME

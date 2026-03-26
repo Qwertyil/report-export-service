@@ -42,4 +42,3 @@ def validate_mvp_error_code(value: str) -> JobErrorCode:
     if value not in MVP_ERROR_CODES:
         raise ValueError(f"Unknown MVP error_code: {value}")
     return value  # type: ignore[return-value]
-

@@ -60,6 +60,11 @@ def test_claim_queued_job_has_single_winner(tmp_path: Path) -> None:
     assert persisted_job.lease_expires_at == claimed_job.lease_expires_at
 
 
+def test_repository_rejects_non_positive_processing_timeout(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="processing_timeout_seconds must be positive"):
+        _repo(tmp_path, processing_timeout_seconds=0)
+
+
 def test_mark_job_done_requires_processing_status(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     repo.create_queued_job("job-done")

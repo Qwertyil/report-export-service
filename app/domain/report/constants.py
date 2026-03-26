@@ -12,4 +12,3 @@ MVP_ERROR_CODES: list[str] = [
     "xlsx_row_limit",
     "artifact_missing",
 ]
-

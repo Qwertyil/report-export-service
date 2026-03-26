@@ -19,6 +19,29 @@ def test_settings_require_absolute_shared_jobs_root(monkeypatch: pytest.MonkeyPa
         Settings()
 
 
+@pytest.mark.parametrize(
+    ("env_name", "env_value", "message"),
+    [
+        ("REPORT_EXPORT_READ_CHUNK_SIZE", "0", "read_chunk_size must be positive"),
+        ("REPORT_EXPORT_NORMALIZER_CACHE_SIZE", "0", "normalizer_cache_size must be positive"),
+        ("REPORT_EXPORT_STATS_BATCH_SIZE", "0", "stats_batch_size must be positive"),
+        ("REPORT_EXPORT_PROCESSING_TIMEOUT_SECONDS", "0", "processing_timeout_seconds must be positive"),
+        ("REPORT_EXPORT_XLSX_MAX_DATA_ROWS", "0", "xlsx_max_data_rows must be positive"),
+    ],
+)
+def test_settings_require_positive_runtime_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    env_value: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv(env_name, env_value)
+    get_settings.cache_clear()
+
+    with pytest.raises(ValidationError, match=message):
+        Settings()
+
+
 def test_create_app_prepares_shared_jobs_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     shared_jobs_root = tmp_path / "shared-jobs-root"
     monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(shared_jobs_root))
