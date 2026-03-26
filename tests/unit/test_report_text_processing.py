@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 import app.domain.report.normalizer as normalizer_module
 from app.domain.report.normalizer import LemmaNormalizer
-from app.domain.report.tokenizer import LineCompletedEvent, TextTokenizer, TokenCompletedEvent
+from app.domain.report.tokenizer import (
+    LineCompletedEvent,
+    TextTokenizer,
+    TokenCompletedEvent,
+    TokenTooLongError,
+)
 
 
 def _collect_events(*chunks: str):
@@ -53,6 +60,13 @@ def test_tokenizer_empty_file_and_blank_lines() -> None:
 
 def test_tokenizer_counts_last_line_without_tokens() -> None:
     assert _collect_events("  !!!") == [LineCompletedEvent()]
+
+
+def test_tokenizer_fails_when_token_exceeds_limit() -> None:
+    tokenizer = TextTokenizer(max_token_length=3)
+
+    with pytest.raises(TokenTooLongError):
+        tokenizer.feed("abcd")
 
 
 def test_lemma_normalizer_collapses_word_forms_and_preserves_latin() -> None:

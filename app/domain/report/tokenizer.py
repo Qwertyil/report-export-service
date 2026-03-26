@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+class TokenTooLongError(Exception):
+    """A token exceeded the configured tokenizer limit."""
+
+
 def _normalize_token_char(char: str) -> str:
     normalized = char.lower()
     if normalized == "ё":
@@ -26,10 +30,13 @@ TokenizerEvent = TokenCompletedEvent | LineCompletedEvent
 class TextTokenizer:
     """Stateful tokenizer for decoded text chunks."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_token_length: int = 100_000) -> None:
+        if max_token_length < 1:
+            raise ValueError("max_token_length must be positive")
         self._pending_token_chars: list[str] = []
         self._pending_carriage_return = False
         self._line_has_content = False
+        self._max_token_length = max_token_length
 
     def feed(self, text: str) -> list[TokenizerEvent]:
         events: list[TokenizerEvent] = []
@@ -53,6 +60,8 @@ class TextTokenizer:
             self._line_has_content = True
 
             if char.isalpha():
+                if len(self._pending_token_chars) >= self._max_token_length:
+                    raise TokenTooLongError("token length exceeds max_token_length")
                 self._pending_token_chars.append(_normalize_token_char(char))
                 continue
 

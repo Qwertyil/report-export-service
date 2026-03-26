@@ -82,6 +82,7 @@ If `\x00` appears in successfully decoded text, the job also finishes as `unsupp
 - text is lowercased;
 - `ё` is normalized to `е`;
 - Latin letters are supported as regular tokens;
+- a token longer than `max_token_length` fails the job with `xlsx_cell_limit`;
 - empty lines are included in `line_count`;
 - the last line is counted even without a trailing `\n`.
 
@@ -137,6 +138,7 @@ Environment variables with the `REPORT_EXPORT_` prefix:
 - `READ_CHUNK_SIZE` (default: `1_048_576`)
 - `NORMALIZER_CACHE_SIZE` (default: `100_000`)
 - `STATS_BATCH_SIZE` (default: `10_000`)
+- `MAX_TOKEN_LENGTH` (default: `100_000`)
 - `PROCESSING_TIMEOUT_SECONDS` (default: `600`)
 - `XLSX_CELL_CHAR_LIMIT` (default: `32767`)
 - `XLSX_MAX_DATA_ROWS` (default: `1_048_575`)

@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     read_chunk_size: int = 1024 * 1024
     normalizer_cache_size: int = 100_000
     stats_batch_size: int = 10_000
+    max_token_length: int = 100_000
     processing_timeout_seconds: int = 600
 
     xlsx_cell_char_limit: int = 32767
@@ -48,6 +49,7 @@ class Settings(BaseSettings):
         "read_chunk_size",
         "normalizer_cache_size",
         "stats_batch_size",
+        "max_token_length",
         "processing_timeout_seconds",
         "xlsx_max_data_rows",
     )

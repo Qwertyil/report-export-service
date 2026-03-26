@@ -9,7 +9,12 @@ from pydantic import ValidationError
 
 from app.core.settings import get_settings
 from app.domain.report.normalizer import LemmaNormalizer
-from app.domain.report.tokenizer import LineCompletedEvent, TextTokenizer, TokenCompletedEvent
+from app.domain.report.tokenizer import (
+    LineCompletedEvent,
+    TextTokenizer,
+    TokenCompletedEvent,
+    TokenTooLongError,
+)
 from app.infrastructure.celery_app import REPORT_EXPORT_TASK_NAME, celery_app
 from app.infrastructure.job_repository import get_job_repository
 from app.infrastructure.report_stats_storage import SqliteReportStatsStorage
@@ -126,13 +131,14 @@ def _try_collect_stats(
     chunk_size: int,
     normalizer: LemmaNormalizer,
     batch_size: int,
+    max_token_length: int,
     max_data_rows: int,
     deadline: float,
     stats_path: Path,
 ) -> tuple[int, int] | None:
     decoder_factory = codecs.getincrementaldecoder(encoding)
     decoder = decoder_factory()
-    tokenizer = TextTokenizer()
+    tokenizer = TextTokenizer(max_token_length=max_token_length)
     storage = SqliteReportStatsStorage(stats_path, reset=True)
     batch = _AggregationBatch(batch_size)
     line_count = 0
@@ -202,7 +208,13 @@ def _try_collect_stats(
         if unique_lemma_count > max_data_rows:
             storage.delete_file()
             raise _XlsxRowLimitError("unique lemma count exceeds xlsx data row limit")
-    except (_NullByteInTextError, _ProcessingTimeoutError, _XlsxCellLimitError, _XlsxRowLimitError):
+    except (
+        _NullByteInTextError,
+        _ProcessingTimeoutError,
+        _XlsxCellLimitError,
+        _XlsxRowLimitError,
+        TokenTooLongError,
+    ):
         storage.delete_file()
         raise
 
@@ -218,6 +230,8 @@ def _collect_stats(input_path: Path, stats_path: Path) -> tuple[int, int]:
     _require_positive_worker_setting("read_chunk_size", settings.read_chunk_size)
     _require_positive_worker_setting("normalizer_cache_size", settings.normalizer_cache_size)
     _require_positive_worker_setting("stats_batch_size", settings.stats_batch_size)
+    max_token_length = int(getattr(settings, "max_token_length", 100_000))
+    _require_positive_worker_setting("max_token_length", max_token_length)
     _require_positive_worker_setting("processing_timeout_seconds", settings.processing_timeout_seconds)
     _require_positive_worker_setting("xlsx_max_data_rows", settings.xlsx_max_data_rows)
 
@@ -235,6 +249,7 @@ def _collect_stats(input_path: Path, stats_path: Path) -> tuple[int, int]:
                 chunk_size=settings.read_chunk_size,
                 normalizer=normalizer,
                 batch_size=settings.stats_batch_size,
+                max_token_length=max_token_length,
                 max_data_rows=settings.xlsx_max_data_rows,
                 deadline=deadline,
                 stats_path=stats_path,
@@ -295,6 +310,13 @@ def run_report_job(job_id: str) -> None:
         )
         return
     except _XlsxCellLimitError as exc:
+        repo.mark_job_failed(
+            job_id,
+            error_code="xlsx_cell_limit",
+            error_message=str(exc),
+        )
+        return
+    except TokenTooLongError as exc:
         repo.mark_job_failed(
             job_id,
             error_code="xlsx_cell_limit",

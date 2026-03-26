@@ -444,3 +444,40 @@ def test_export_sync_processing_surfaces_xlsx_row_limit(tmp_path: Path, monkeypa
     local_client.close()
     get_job_repository.cache_clear()
     get_settings.cache_clear()
+
+
+def test_export_sync_processing_surfaces_token_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
+    monkeypatch.setenv("REPORT_EXPORT_MAX_TOKEN_LENGTH", "8")
+    monkeypatch.setattr(report_route, "enqueue_report_job", lambda job_id: run_report_job(job_id))
+
+    get_settings.cache_clear()
+    get_job_repository.cache_clear()
+    local_client = TestClient(create_app())
+
+    submit_response = local_client.post(
+        "/public/report/export",
+        files={"file": ("long-token.txt", b"aaaaaaaaa", "text/plain")},
+    )
+    assert submit_response.status_code == 202
+    job_id = submit_response.json()["job_id"]
+
+    status_response = local_client.get(f"/public/report/{job_id}/status")
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        "job_id": job_id,
+        "status": "failed",
+        "download_url": None,
+        "error": {
+            "error_code": "xlsx_cell_limit",
+            "error_message": "token length exceeds max_token_length",
+        },
+    }
+
+    download_response = local_client.get(f"/public/report/{job_id}/download")
+    assert download_response.status_code == 409
+    assert download_response.json() == {"detail": "job is not ready for download"}
+
+    local_client.close()
+    get_job_repository.cache_clear()
+    get_settings.cache_clear()

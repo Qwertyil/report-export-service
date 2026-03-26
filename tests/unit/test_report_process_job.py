@@ -585,6 +585,7 @@ def test_try_collect_stats_returns_none_on_incomplete_utf8_at_eof(
             chunk_size=99,
             normalizer=normalizer,
             batch_size=10,
+            max_token_length=100_000,
             max_data_rows=100,
             deadline=float("inf"),
             stats_path=tmp_path / "stats.sqlite",
@@ -660,6 +661,7 @@ def test_try_collect_stats_handles_crlf_split_across_chunks(
         chunk_size=4,
         normalizer=normalizer,
         batch_size=10,
+        max_token_length=100_000,
         max_data_rows=100,
         deadline=float("inf"),
         stats_path=tmp_path / "stats.sqlite",
@@ -788,3 +790,31 @@ def test_run_report_job_fails_when_processing_timeout_is_exceeded(
     assert job is not None
     assert job.status == JobStatus.failed
     assert job.error_code == "processing_timeout"
+
+
+def test_run_report_job_fails_when_token_exceeds_max_length(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
+    monkeypatch.setenv("REPORT_EXPORT_MAX_TOKEN_LENGTH", "8")
+    from app.core.settings import get_settings
+
+    get_settings.cache_clear()
+    get_job_repository.cache_clear()
+
+    repo = get_job_repository()
+    assert isinstance(repo, SqliteJobRepository)
+    repo.create_queued_job("job-token-limit")
+    created = repo.get_job("job-token-limit")
+    assert created is not None
+    assert created.input_path is not None
+    Path(created.input_path).write_bytes(b"aaaaaaaaa")
+
+    run_report_job("job-token-limit")
+
+    job = repo.get_job("job-token-limit")
+    assert job is not None
+    assert job.status == JobStatus.failed
+    assert job.error_code == "xlsx_cell_limit"
+    assert job.error_message == "token length exceeds max_token_length"
