@@ -127,6 +127,44 @@ Worker:
 celery -A app.infrastructure.celery_app worker --loglevel=info
 ```
 
+## Run In Containers
+
+Prerequisites:
+
+- Docker
+- Docker Compose (v2, via `docker compose`)
+
+Start all services (API + worker + Redis):
+
+```bash
+docker compose up --build
+```
+
+Run in background:
+
+```bash
+docker compose up -d --build
+```
+
+Stop and remove containers:
+
+```bash
+docker compose down
+```
+
+API will be available at:
+
+- `http://localhost:8000`
+
+Useful Make targets:
+
+```bash
+make docker-build
+make docker-up
+make docker-logs
+make docker-down
+```
+
 ## Tests
 
 - unit: tokenizer, normalizer, streaming aggregation, `job_repository`, sqlite stats storage, xlsx writer;

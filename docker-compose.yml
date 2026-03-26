@@ -1,0 +1,34 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      REPORT_EXPORT_REDIS_URL: redis://redis:6379/0
+      REPORT_EXPORT_SHARED_JOBS_ROOT: /tmp/report-export-shared-jobs
+    ports:
+      - "8000:8000"
+    volumes:
+      - shared-jobs:/tmp/report-export-shared-jobs
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.infrastructure.celery_app worker --loglevel=info
+    environment:
+      REPORT_EXPORT_REDIS_URL: redis://redis:6379/0
+      REPORT_EXPORT_SHARED_JOBS_ROOT: /tmp/report-export-shared-jobs
+    volumes:
+      - shared-jobs:/tmp/report-export-shared-jobs
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+
+volumes:
+  shared-jobs:

@@ -1,0 +1,14 @@
+.git
+.gitignore
+.coverage
+.pytest_cache
+.mypy_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+tests
+implementation_plan.md
+AGENTS.md
