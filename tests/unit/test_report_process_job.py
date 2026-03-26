@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from openpyxl import load_workbook  # type: ignore[import-untyped]
 
 from app.domain.report.job_repository import Job, JobStatus
 from app.domain.report.normalizer import LemmaNormalizer
@@ -43,7 +44,7 @@ def test_enqueue_report_job_send_task_arguments(monkeypatch: pytest.MonkeyPatch)
     }
 
 
-def test_run_report_job_marks_done_with_placeholder_xlsx_and_stats(
+def test_run_report_job_marks_done_with_streaming_xlsx_and_stats(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -72,6 +73,15 @@ def test_run_report_job_marks_done_with_placeholder_xlsx_and_stats(
     assert job.unique_lemma_count == 1
     assert job.output_path is not None
     assert Path(job.output_path).is_file()
+
+    workbook = load_workbook(job.output_path, read_only=True)
+    worksheet = workbook.active
+    assert list(worksheet.iter_rows(values_only=True)) == [
+        ("lemma", "total_count", "counts_per_line"),
+        ("кошка", 2, "1,1"),
+    ]
+    workbook.close()
+
     stats = SqliteReportStatsStorage(created.stats_path)
     assert stats.fetch_lemma_totals() == [("кошка", 2)]
     assert stats.fetch_line_counts() == [("кошка", 1, 1), ("кошка", 2, 1)]
@@ -206,6 +216,33 @@ def test_run_report_job_fails_xlsx_line_cap(
     assert job.error_code == "xlsx_cell_limit"
 
 
+def test_run_report_job_fails_when_writer_exceeds_xlsx_cell_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
+    monkeypatch.setenv("REPORT_EXPORT_XLSX_CELL_CHAR_LIMIT", "2")
+    from app.core.settings import get_settings
+
+    get_settings.cache_clear()
+    get_job_repository.cache_clear()
+
+    repo = get_job_repository()
+    assert isinstance(repo, SqliteJobRepository)
+    repo.create_queued_job("job-writer-cell-limit")
+    created = repo.get_job("job-writer-cell-limit")
+    assert created is not None
+    assert created.input_path is not None
+    Path(created.input_path).write_bytes(b"alpha\n\n")
+
+    run_report_job("job-writer-cell-limit")
+
+    job = repo.get_job("job-writer-cell-limit")
+    assert job is not None
+    assert job.status == JobStatus.failed
+    assert job.error_code == "xlsx_cell_limit"
+
+
 def test_run_report_job_fails_when_output_write_raises_os_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -227,7 +264,7 @@ def test_run_report_job_fails_when_output_write_raises_os_error(
     def _boom(*_args: object, **_kwargs: object) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr("app.workers.report_process_job._write_minimal_xlsx", _boom)
+    monkeypatch.setattr("app.workers.report_process_job.write_report_xlsx", _boom)
 
     run_report_job("job-os")
 
@@ -479,6 +516,35 @@ def test_run_report_job_fails_on_invalid_xlsx_max_data_rows_configuration(
     assert job.error_message is not None
     assert "invalid worker configuration" in job.error_message
     assert "xlsx_max_data_rows" in job.error_message
+
+
+def test_run_report_job_fails_on_invalid_xlsx_cell_char_limit_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
+    monkeypatch.setenv("REPORT_EXPORT_XLSX_CELL_CHAR_LIMIT", "0")
+    from app.core.settings import get_settings
+
+    get_settings.cache_clear()
+    get_job_repository.cache_clear()
+
+    repo = get_job_repository()
+    assert isinstance(repo, SqliteJobRepository)
+    repo.create_queued_job("job-bad-xlsx-cell-limit")
+    created = repo.get_job("job-bad-xlsx-cell-limit")
+    assert created is not None
+    assert created.input_path is not None
+    Path(created.input_path).write_bytes(b"alpha\n")
+
+    run_report_job("job-bad-xlsx-cell-limit")
+
+    job = repo.get_job("job-bad-xlsx-cell-limit")
+    assert job is not None
+    assert job.status == JobStatus.failed
+    assert job.error_code == "artifact_missing"
+    assert job.error_message is not None
+    assert "xlsx_cell_char_limit" in job.error_message
 
 
 def test_run_report_job_fails_when_job_has_no_paths(monkeypatch: pytest.MonkeyPatch) -> None:

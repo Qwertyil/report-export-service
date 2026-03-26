@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -93,28 +94,48 @@ class SqliteReportStatsStorage:
         return new_lemma_count
 
     def fetch_lemma_totals(self) -> list[tuple[str, int]]:
+        return list(self.iter_lemma_totals())
+
+    def fetch_line_counts(self) -> list[tuple[str, int, int]]:
+        return list(self.iter_line_counts())
+
+    def iter_lemma_totals(self, *, batch_size: int = 1_000) -> Iterator[tuple[str, int]]:
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+
         with self._connect() as connection:
-            rows = connection.execute(
+            cursor = connection.execute(
                 """
                 SELECT lemma, total_count
                 FROM lemma_totals
                 ORDER BY lemma ASC
                 """
-            ).fetchall()
+            )
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                for row in rows:
+                    yield row["lemma"], row["total_count"]
 
-        return [(row["lemma"], row["total_count"]) for row in rows]
+    def iter_line_counts(self, *, batch_size: int = 1_000) -> Iterator[tuple[str, int, int]]:
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
 
-    def fetch_line_counts(self) -> list[tuple[str, int, int]]:
         with self._connect() as connection:
-            rows = connection.execute(
+            cursor = connection.execute(
                 """
                 SELECT lemma, line_no, count
                 FROM line_counts
                 ORDER BY lemma ASC, line_no ASC
                 """
-            ).fetchall()
-
-        return [(row["lemma"], row["line_no"], row["count"]) for row in rows]
+            )
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                for row in rows:
+                    yield row["lemma"], row["line_no"], row["count"]
 
     def delete_file(self) -> None:
         for path in (

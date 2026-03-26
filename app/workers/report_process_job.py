@@ -5,7 +5,6 @@ import sqlite3
 import time
 from pathlib import Path
 
-from openpyxl import Workbook  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from app.core.settings import get_settings
@@ -14,6 +13,7 @@ from app.domain.report.tokenizer import LineCompletedEvent, TextTokenizer, Token
 from app.infrastructure.celery_app import REPORT_EXPORT_TASK_NAME, celery_app
 from app.infrastructure.job_repository import get_job_repository
 from app.infrastructure.report_stats_storage import SqliteReportStatsStorage
+from app.infrastructure.report_xlsx_writer import XlsxCellLimitExceededError, write_report_xlsx
 
 # Step 5 fail-fast: third column cannot fit line_count commas for larger values.
 _MVP_MAX_LINE_COUNT_FOR_XLSX = 16_384
@@ -249,16 +249,6 @@ def _collect_stats(input_path: Path, stats_path: Path) -> tuple[int, int]:
     raise _UnsupportedEncodingError("could not decode file with supported encodings")
 
 
-def _write_minimal_xlsx(output_path: Path) -> None:
-    """Header-only workbook until Step 6 streaming writer reads stats sqlite."""
-    part_path = output_path.with_suffix(output_path.suffix + ".part")
-    workbook = Workbook(write_only=True)
-    worksheet = workbook.create_sheet()
-    worksheet.append(["lemma", "total_count", "counts_per_line"])
-    workbook.save(str(part_path))
-    part_path.replace(output_path)
-
-
 def run_report_job(job_id: str) -> None:
     repo = get_job_repository()
     job = repo.claim_queued_job(job_id)
@@ -341,13 +331,41 @@ def run_report_job(job_id: str) -> None:
         return
 
     try:
+        settings = get_settings()
+        _require_positive_worker_setting("xlsx_cell_char_limit", settings.xlsx_cell_char_limit)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_minimal_xlsx(output_path)
-    except OSError as exc:
+        write_report_xlsx(
+            stats_path=stats_path,
+            output_path=output_path,
+            line_count=line_count,
+            cell_char_limit=settings.xlsx_cell_char_limit,
+        )
+    except XlsxCellLimitExceededError as exc:
+        repo.mark_job_failed(
+            job_id,
+            error_code="xlsx_cell_limit",
+            error_message=str(exc),
+        )
+        return
+    except (OSError, sqlite3.Error) as exc:
         repo.mark_job_failed(
             job_id,
             error_code="artifact_missing",
             error_message=f"could not write report output: {exc}",
+        )
+        return
+    except ValidationError as exc:
+        repo.mark_job_failed(
+            job_id,
+            error_code="artifact_missing",
+            error_message=f"invalid worker configuration: {exc}",
+        )
+        return
+    except (_WorkerConfigurationError, ValueError) as exc:
+        repo.mark_job_failed(
+            job_id,
+            error_code="artifact_missing",
+            error_message=str(exc),
         )
         return
 
