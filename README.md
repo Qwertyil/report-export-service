@@ -115,6 +115,14 @@ Worker пробует декодировать файл строго в поря
 - `XLSX_CELL_CHAR_LIMIT` (default: `32767`)
 - `XLSX_MAX_DATA_ROWS` (default: `1_048_575`)
 
+Создайте локальный env-файл из шаблона:
+
+```bash
+cp .env.example .env
+```
+
+`docker compose` автоматически подхватит `.env` из корня проекта.
+
 ## Local Run
 
 ```bash
