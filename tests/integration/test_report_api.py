@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from app.main import create_app
 
 
 @pytest.fixture()
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None, None]:
     monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
 
     get_settings.cache_clear()
@@ -56,6 +57,7 @@ def test_export_submit_returns_202_and_job_links(client: TestClient) -> None:
 
     assert job is not None
     assert job.status == JobStatus.queued
+    assert job.input_path is not None
     assert Path(job.input_path).parent.is_dir()
 
 
@@ -123,6 +125,7 @@ def test_download_returns_file_for_done_job(client: TestClient) -> None:
     claimed_job = repo.claim_queued_job(job.job_id)
     assert claimed_job is not None
 
+    assert job.output_path is not None
     output_path = Path(job.output_path)
     output_path.write_bytes(b"fake-xlsx")
 

@@ -1,5 +1,6 @@
 import uuid
 from pathlib import Path
+from typing import cast
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
@@ -10,10 +11,10 @@ from app.api.schemas.report import (
     JobStatusResponse,
     validate_mvp_error_code,
 )
+from app.api.schemas.report import JobStatus as ResponseJobStatus
 from app.core.settings import get_settings
 from app.domain.report.job_repository import JobStatus
 from app.infrastructure.job_repository import get_job_repository
-
 
 router = APIRouter(prefix="/report", tags=["report"])
 
@@ -39,7 +40,7 @@ async def export_report(file: UploadFile = File(...)) -> ExportSubmitResponse:
 
     return ExportSubmitResponse(
         job_id=job_id,
-        status=JobStatus.queued.value,
+        status="queued",
         status_url=status_url,
         download_url=download_url,
     )
@@ -56,7 +57,12 @@ async def get_report_status(job_id: str) -> JobStatusResponse:
     download_url = f"{settings.api_prefix}/report/{job_id}/download"
 
     if job.status == JobStatus.done:
-        return JobStatusResponse(job_id=job.job_id, status=job.status.value, download_url=download_url, error=None)
+        return JobStatusResponse(
+            job_id=job.job_id,
+            status=cast(ResponseJobStatus, job.status.value),
+            download_url=download_url,
+            error=None,
+        )
 
     if job.status == JobStatus.failed:
         if job.error_code is None:
@@ -69,10 +75,19 @@ async def get_report_status(job_id: str) -> JobStatusResponse:
             error_code=validate_mvp_error_code(job.error_code),
             error_message=job.error_message,
         )
-        return JobStatusResponse(job_id=job.job_id, status=job.status.value, download_url=None, error=error)
+        return JobStatusResponse(
+            job_id=job.job_id,
+            status=cast(ResponseJobStatus, job.status.value),
+            download_url=None,
+            error=error,
+        )
 
-    # queued | processing
-    return JobStatusResponse(job_id=job.job_id, status=job.status.value, download_url=None, error=None)
+    return JobStatusResponse(
+        job_id=job.job_id,
+        status=cast(ResponseJobStatus, job.status.value),
+        download_url=None,
+        error=None,
+    )
 
 
 @router.get("/{job_id}/download")
