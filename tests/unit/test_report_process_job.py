@@ -247,6 +247,21 @@ def test_try_count_lines_tail_flush_includes_newline(
     assert _try_count_lines(p, "utf-8", chunk_size=1024) == 1
 
 
+def test_try_count_lines_counts_punctuation_only_last_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
+    from app.core.settings import get_settings
+    from app.workers.report_process_job import _try_count_lines
+
+    get_settings.cache_clear()
+    path = tmp_path / "punctuation.txt"
+    path.write_bytes(b"  !!!")
+
+    assert _try_count_lines(path, "utf-8", chunk_size=2) == 1
+
+
 def test_run_report_job_fails_when_no_codec_accepts_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -370,3 +385,18 @@ def test_run_report_job_fails_on_null_byte(
     assert job is not None
     assert job.status == JobStatus.failed
     assert job.error_code == "unsupported_encoding"
+
+
+def test_try_count_lines_handles_crlf_split_across_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
+    from app.core.settings import get_settings
+    from app.workers.report_process_job import _try_count_lines
+
+    get_settings.cache_clear()
+    path = tmp_path / "crlf.txt"
+    path.write_bytes(b"one\r\ntwo")
+
+    assert _try_count_lines(path, "utf-8", chunk_size=4) == 2

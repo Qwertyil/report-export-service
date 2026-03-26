@@ -6,6 +6,7 @@ from pathlib import Path
 from openpyxl import Workbook  # type: ignore[import-untyped]
 
 from app.core.settings import get_settings
+from app.domain.report.tokenizer import LineCompletedEvent, TextTokenizer
 from app.infrastructure.celery_app import REPORT_EXPORT_TASK_NAME, celery_app
 from app.infrastructure.job_repository import get_job_repository
 
@@ -20,8 +21,8 @@ class _NullByteInTextError(Exception):
 def _try_count_lines(path: Path, encoding: str, chunk_size: int) -> int | None:
     decoder_factory = codecs.getincrementaldecoder(encoding)
     decoder = decoder_factory()
+    tokenizer = TextTokenizer()
     line_count = 0
-    pending_line = False
 
     with path.open("rb") as handle:
         while True:
@@ -34,12 +35,10 @@ def _try_count_lines(path: Path, encoding: str, chunk_size: int) -> int | None:
                 return None
             if "\x00" in text:
                 raise _NullByteInTextError
-            for char in text:
-                if char == "\n":
+
+            for event in tokenizer.feed(text):
+                if isinstance(event, LineCompletedEvent):
                     line_count += 1
-                    pending_line = False
-                else:
-                    pending_line = True
 
         try:
             tail = decoder.decode(b"", final=True)
@@ -47,15 +46,14 @@ def _try_count_lines(path: Path, encoding: str, chunk_size: int) -> int | None:
             return None
         if "\x00" in tail:
             raise _NullByteInTextError
-        for char in tail:
-            if char == "\n":
-                line_count += 1
-                pending_line = False
-            else:
-                pending_line = True
 
-    if pending_line:
-        line_count += 1
+        for event in tokenizer.feed(tail):
+            if isinstance(event, LineCompletedEvent):
+                line_count += 1
+
+    for event in tokenizer.finish():
+        if isinstance(event, LineCompletedEvent):
+            line_count += 1
 
     return line_count
 
