@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook  # type: ignore[import-untyped]
 
 from app.api.routes import report as report_route
 from app.core.settings import get_settings
 from app.domain.report.job_repository import JobStatus
 from app.infrastructure.job_repository import SqliteJobRepository, get_job_repository
 from app.main import create_app
+from app.workers.report_process_job import run_report_job
 
 
 @pytest.fixture()
@@ -319,3 +322,125 @@ def test_export_submit_marks_job_failed_when_queue_publish_fails(
     assert job.error_message == "queue is unavailable"
     assert job.input_path is not None
     assert not Path(job.input_path).exists()
+
+
+def test_export_processing_done_download_flow(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(report_route, "enqueue_report_job", lambda job_id: run_report_job(job_id))
+
+    submit_response = client.post(
+        "/public/report/export",
+        files={"file": ("sample.txt", "Кошки\nкошку\n".encode("utf-8"), "text/plain")},
+    )
+    assert submit_response.status_code == 202
+    job_id = submit_response.json()["job_id"]
+
+    status_response = client.get(f"/public/report/{job_id}/status")
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        "job_id": job_id,
+        "status": "done",
+        "download_url": f"/public/report/{job_id}/download",
+        "error": None,
+    }
+
+    download_response = client.get(f"/public/report/{job_id}/download")
+    assert download_response.status_code == 200
+    workbook = load_workbook(filename=BytesIO(download_response.content), read_only=True)
+    worksheet = workbook.active
+    assert list(worksheet.iter_rows(values_only=True)) == [
+        ("lemma", "total_count", "counts_per_line"),
+        ("кошка", 2, "1,1"),
+    ]
+    workbook.close()
+
+
+def test_export_sync_processing_surfaces_decode_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(report_route, "enqueue_report_job", lambda job_id: run_report_job(job_id))
+
+    submit_response = client.post(
+        "/public/report/export",
+        files={"file": ("bad.bin", bytes(range(256)), "application/octet-stream")},
+    )
+    assert submit_response.status_code == 202
+    job_id = submit_response.json()["job_id"]
+
+    status_response = client.get(f"/public/report/{job_id}/status")
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        "job_id": job_id,
+        "status": "failed",
+        "download_url": None,
+        "error": {
+            "error_code": "unsupported_encoding",
+            "error_message": "could not decode file with supported encodings",
+        },
+    }
+
+    download_response = client.get(f"/public/report/{job_id}/download")
+    assert download_response.status_code == 409
+    assert download_response.json() == {"detail": "job is not ready for download"}
+
+
+def test_export_sync_processing_surfaces_xlsx_cell_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
+    monkeypatch.setattr(report_route, "enqueue_report_job", lambda job_id: run_report_job(job_id))
+
+    get_settings.cache_clear()
+    get_job_repository.cache_clear()
+    local_client = TestClient(create_app())
+
+    submit_response = local_client.post(
+        "/public/report/export",
+        files={"file": ("many-lines.txt", b"\n" * 16385, "text/plain")},
+    )
+    assert submit_response.status_code == 202
+    job_id = submit_response.json()["job_id"]
+
+    status_response = local_client.get(f"/public/report/{job_id}/status")
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        "job_id": job_id,
+        "status": "failed",
+        "download_url": None,
+        "error": {
+            "error_code": "xlsx_cell_limit",
+            "error_message": "line_count exceeds MVP limit for xlsx third column",
+        },
+    }
+
+    local_client.close()
+    get_job_repository.cache_clear()
+    get_settings.cache_clear()
+
+
+def test_export_sync_processing_surfaces_xlsx_row_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPORT_EXPORT_SHARED_JOBS_ROOT", str(tmp_path))
+    monkeypatch.setenv("REPORT_EXPORT_XLSX_MAX_DATA_ROWS", "1")
+    monkeypatch.setattr(report_route, "enqueue_report_job", lambda job_id: run_report_job(job_id))
+
+    get_settings.cache_clear()
+    get_job_repository.cache_clear()
+    local_client = TestClient(create_app())
+
+    submit_response = local_client.post(
+        "/public/report/export",
+        files={"file": ("lemmas.txt", b"alpha beta", "text/plain")},
+    )
+    assert submit_response.status_code == 202
+    job_id = submit_response.json()["job_id"]
+
+    status_response = local_client.get(f"/public/report/{job_id}/status")
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        "job_id": job_id,
+        "status": "failed",
+        "download_url": None,
+        "error": {
+            "error_code": "xlsx_row_limit",
+            "error_message": "unique lemma count exceeds xlsx data row limit",
+        },
+    }
+
+    local_client.close()
+    get_job_repository.cache_clear()
+    get_settings.cache_clear()

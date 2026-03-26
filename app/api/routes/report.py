@@ -235,6 +235,10 @@ async def download_report(job_id: str) -> FileResponse:
     if job.status != JobStatus.done:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="job is not ready for download")
 
+    if job.output_path is None:
+        _repair_done_job_missing_artifact(repo, job)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="job is not ready for download")
+
     output_path = Path(job.output_path)
     if not output_path.is_file():
         _repair_done_job_missing_artifact(repo, job)

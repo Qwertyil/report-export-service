@@ -1,396 +1,133 @@
 # Report Export Service
 
-Сервис для асинхронного анализа больших текстовых файлов и экспорта частотной статистики по леммам в `xlsx`.
+Сервис для асинхронной обработки больших текстовых файлов и экспорта статистики по леммам в `xlsx`.
 
-Проект выполняет тестовое задание:
-
-- принимает текстовый файл;
-- приводит слова к нормальной форме;
-- считает количество вхождений по всему документу;
-- считает количество вхождений в каждой строке;
-- формирует `xlsx`-отчет с тремя столбцами:
-  - лемма;
-  - количество по всему документу;
-  - количества по строкам в виде строки вида `"0,11,32,0,0,3"`.
-
-## Статус
-
-Сейчас в репозитории реализован Step 1 skeleton: зафиксирован базовый HTTP-контракт, добавлены настройки MVP и подготовлен in-memory `job_repository`, через который `status/download` читают состояние job.
-
-Что уже есть:
-
-- структура каталогов и базовый `FastAPI` app;
-- `health` endpoint;
-- `report` endpoints с response-схемами;
-- Step 1 настройки MVP;
-- in-memory repository с детерминированными путями артефактов.
-
-Что еще не реализовано:
-
-- сохранение содержимого upload на `POST /public/report/export`;
-- публикация job в `Celery`;
-- background worker pipeline;
-- persistent repository, переживающий рестарт процессов;
-- генерация `xlsx`.
-
-Что считается завершением Step 1 в текущем репозитории:
-
-- пользовательским источником истины для статуса job является только `job_repository`;
-- `Celery` result backend может оставаться включенным для локального smoke, но `status/download` не читают состояние из него;
-- `shared_jobs_root` обязан быть абсолютным путем; `api` и `worker` должны видеть один и тот же mounted volume по одному и тому же абсолютному пути;
-- приложение на старте подготавливает локальную shared-root директорию, но не может само по себе доказать, что второй процесс смонтирован в тот же volume;
-- для production-like запуска внешний request body size limit должен быть не выше `max_upload_size_bytes`;
-- прикладная проверка размера при сохранении upload и cleanup partial-файлов остаются задачей следующего шага, где появится реальное сохранение входного файла;
-- `v1` поддерживает только асинхронную трактовку `POST /public/report/export`;
-- `v1` пишет отчет в один worksheet с header row;
-- `processing_timeout_seconds` в MVP резервирует wall-clock deadline внутри worker-пайплайна и не является механизмом recovery после падения процесса.
-
-## Почему решение строится асинхронно
-
-По условию один или несколько пользователей могут отправить очень большие файлы, вплоть до гигабайтов.
-
-Если обрабатывать такой файл прямо внутри HTTP endpoint, это приведет к проблемам:
-
-- web-процесс будет долго занят;
-- другие запросы начнут деградировать по latency;
-- один тяжелый сценарий сможет повлиять на доступность всего API.
-
-Целевой pipeline для следующих шагов выглядит так:
-
-- `FastAPI` принимает файл и создает job;
-- тяжелая обработка выносится в background worker через `Celery`;
-- `Redis` используется как broker для фоновых задач;
-- пользовательские статусы job и ссылки на артефакты читаются из отдельного `job_repository`, а не из `Celery` result backend;
-- в MVP сервис не обещает строгий admission control до начала upload; best-effort guard'ы по shared storage и backlog'у запланированы как отдельный hardening-этап;
-- готовый отчет скачивается отдельным запросом после завершения обработки.
-
-![Runtime planning diagram](assets/runtime_planning_diagram.png)
-
-## Архитектура
-
-Проект организован в стиле `DDD-lite` / layered architecture.
-
-```text
-app/
-  main.py
-  api/
-    routes/
-    schemas/
-  application/
-    use_cases/
-  domain/
-    text/
-    report/
-  infrastructure/
-    celery/
-    storage/
-    export/
-  core/
-
-tests/
-  unit/
-  integration/
-```
-
-### Слои
-
-`app/api`
-
-- HTTP endpoints;
-- request/response схемы;
-- валидация входного контракта;
-- никакой тяжелой бизнес-логики.
-
-`app/application`
-
-- orchestration use-case'ов;
-- создание job;
-- чтение статуса;
-- выдача результата.
-
-`app/domain`
-
-- токенизация текста;
-- нормализация слов;
-- агрегация статистики;
-- доменные правила.
-
-`app/infrastructure`
-
-- `Celery` и background tasks;
-- работа с временными файлами;
-- хранение промежуточной статистики;
-- генерация `xlsx`.
-
-`app/core`
-
-- конфигурация;
-- логирование;
-- общие настройки.
-
-## Current API
-
-Ниже описан именно текущий HTTP-контракт Step 1. Исходное ТЗ формально называет один публичный endpoint `/public/report/export`, поэтому `POST /public/report/export` сохраняется как обязательная входная точка, а `GET /status` и `GET /download` уже выделены как отдельные endpoint'ы под будущий async pipeline.
+## MVP Contract
 
 ### `POST /public/report/export`
 
-Принимает `multipart/form-data` с полем `file`, создает `job_id`, записывает job в текущий in-memory repository и возвращает `202 Accepted`.
+- принимает `multipart/form-data` с полем `file`;
+- сохраняет upload в `shared_jobs_root/<job_id>/input` с прикладной проверкой размера;
+- создает job в persistent `job_repository`;
+- публикует задачу в очередь;
+- возвращает `202 Accepted` с `job_id`, `status`, `status_url`, `download_url`.
 
-Текущее поведение:
+Возможные ошибки:
 
-- создается `job_id`;
-- создается директория job внутри `shared_jobs_root`;
-- job получает статус `queued`;
-- клиент получает `202 Accepted` с `job_id`, `status_url` и `download_url`;
-- содержимое upload пока не сохраняется;
-- публикация в очередь пока не выполняется.
-
-Пример ответа:
-
-```json
-{
-  "job_id": "9f8f3bc6-8f5a-48b4-8f63-7a8618e0d5f4",
-  "status": "queued",
-  "status_url": "/public/report/9f8f3bc6-8f5a-48b4-8f63-7a8618e0d5f4/status",
-  "download_url": "/public/report/9f8f3bc6-8f5a-48b4-8f63-7a8618e0d5f4/download"
-}
-```
+- `400` если `file` не передан;
+- `413` если размер upload превышает `max_upload_size_bytes` (partial input удаляется);
+- `503` если публикация в очередь не удалась (job переводится в `failed`, input удаляется best-effort).
 
 ### `GET /public/report/{job_id}/status`
 
-Возвращает состояние job из текущего `job_repository`.
+- читает состояние только из `job_repository`;
+- возвращает `queued | processing | done | failed`;
+- для `done` возвращает `download_url`;
+- для `failed` возвращает `{ error_code, error_message }`;
+- возвращает `404`, если job не существует.
 
-Поддерживаемые статусы:
+Repair-check:
 
-- `queued`
-- `processing`
-- `done`
-- `failed`
-
-Пример ответа:
-
-```json
-{
-  "job_id": "9f8f3bc6-8f5a-48b4-8f63-7a8618e0d5f4",
-  "status": "done",
-  "download_url": "/public/report/9f8f3bc6-8f5a-48b4-8f63-7a8618e0d5f4/download",
-  "error": null
-}
-```
+- если в metadata job указано `done`, но артефакт отсутствует, job ремонтно переводится в `failed` с `error_code = artifact_missing`.
 
 ### `GET /public/report/{job_id}/download`
 
-Отдает готовый `xlsx`-файл, если repository содержит job в статусе `done` и файл артефакта существует.
+- возвращает `200` и `xlsx` только для `done`;
+- возвращает `409` для `queued`, `processing` и `failed`;
+- возвращает `404` для неизвестного `job_id`;
+- использует тот же repair-check `artifact_missing`, что и `/status`.
 
-Текущие ответы:
+## Processing Rules
 
-- `200 OK` для готового отчета;
-- `409 Conflict` для `queued` / `processing` / `failed`;
-- `404 Not Found` для неизвестного `job_id`;
-- `404 Not Found`, если job помечена как `done`, но артефакт отсутствует.
+### Encodings
 
-Пока worker и генерация `xlsx` не реализованы, этот endpoint практически полезен только в тестах или при ручном заполнении repository.
+Worker пробует декодировать файл строго в порядке:
 
-## Ключевые решения
+1. `UTF-8-SIG`
+2. `UTF-8`
+3. `CP1251`
 
-### 1. Потоковая обработка файла
+Если ни одна кодировка не подходит, job завершается как `failed` с `error_code = unsupported_encoding`.
+Если в успешно декодированном тексте встречается `\x00`, job также завершается как `unsupported_encoding`.
 
-Файл должен читаться фиксированными byte chunk'ами через incremental decoder, без загрузки целиком в память и без предположения, что отдельная строка поместится в RAM.
+### Tokenization
 
-Это важно, потому что размер входного документа заранее не ограничен и может быть очень большим.
-
-### 2. Нормализация словоформ
-
-Для приведения слов к нормальной форме планируется использовать `pymorphy3`.
-
-Это позволит считать `житель`, `жителем`, `жители` одной леммой.
-
-Дополнительно будет использоваться кэш нормализованных токенов, чтобы не выполнять морфологический разбор повторно для каждого вхождения.
-
-### 3. Асинхронный pipeline
-
-Обработка больших файлов не должна происходить внутри HTTP request lifecycle.
-
-Поэтому выбрана схема:
-
-- API принимает файл;
-- worker обрабатывает файл в фоне;
-- клиент опрашивает статус;
-- результат скачивается после завершения.
-
-### 3.1. Поддерживаемые кодировки в MVP
-
-В MVP worker пробует декодировать входной файл в фиксированном порядке:
-
-- `UTF-8-SIG`;
-- `UTF-8`;
-- `CP1251`.
-
-Если файл не декодируется ни одной из этих кодировок, job завершается как `failed` с контролируемой ошибкой.
-
-### Настройки MVP (Step 1)
-
-Для Step 1 добавлены следующие параметры окружения (префикс `REPORT_EXPORT_`):
-
-- `shared_jobs_root` (по умолчанию: `/tmp/report-export-shared-jobs`) — общий mounted volume для `api` и `worker`;
-- `max_upload_size_bytes` (по умолчанию: `50 * 1024 * 1024`) — request body размерный лимит для MVP;
-- `supported_encodings` — список декодировок в фиксированном порядке: `UTF-8-SIG`, `UTF-8`, `CP1251`;
-- `read_chunk_size` (по умолчанию: `1_048_576`);
-- `normalizer_cache_size` (по умолчанию: `100_000`);
-- `stats_batch_size` (по умолчанию: `10_000`);
-- `processing_timeout_seconds` (по умолчанию: `600`) — wall-clock deadline обработки job в worker-пайплайне;
-- `xlsx_cell_char_limit` (по умолчанию: `32767`);
-- `xlsx_max_data_rows` (по умолчанию: `1_048_575`).
-
-Часть этих настроек пока резервирует контракт под следующие шаги и еще не используется полным pipeline.
-
-### Step 1 инварианты
-
-- `shared_jobs_root` должен задаваться абсолютным путем; относительное значение считается ошибкой конфигурации;
-- `status/download` читают состояние только из `job_repository`, а не из `Celery` result backend;
-- список `error_code` для MVP фиксирован: `queue_unavailable`, `unsupported_encoding`, `processing_timeout`, `xlsx_cell_limit`, `xlsx_row_limit`, `artifact_missing`.
-
-### 3.2. Правила токенизации в MVP
-
-В MVP правила обработки текста фиксируются явно:
-
-- токеном считается непрерывная последовательность букв;
+- токен = непрерывная последовательность букв;
 - цифры не считаются токенами;
 - дефис разбивает токены;
-- пунктуация и прочий шум отбрасываются;
-- регистр нормализуется к нижнему;
+- пунктуация и прочий шум игнорируются;
+- регистр приводится к нижнему;
 - `ё` нормализуется к `е`;
-- последовательности латинских букв поддерживаются как обычные токены;
-- пустые строки учитываются в `line_count`, но не создают токенов;
+- латиница поддерживается как обычные токены;
+- пустые строки учитываются в `line_count`;
 - последняя строка учитывается даже без завершающего `\n`.
 
-### 4. Bounded memory для статистики по строкам
+### Normalization
 
-Самая дорогая часть задачи не только общий count слов, но и хранение counts по строкам.
+- для токенов с кириллицей используется `pymorphy3`;
+- для токенов без кириллицы возвращается lowercase token;
+- используется bounded LRU-кэш.
 
-Наивный подход вида:
+## XLSX Output
 
-```python
-dict[word] -> list[count_for_each_line]
-```
+Формируется один worksheet с header row:
 
-плохо масштабируется для больших документов и большого числа строк.
+- `lemma`
+- `total_count`
+- `counts_per_line`
 
-Поэтому планируемый подход такой:
+`counts_per_line` содержит значения для всех строк от `1` до `line_count`, включая нули.
 
-- totals, детерминированная сортировка и line-level статистика хранятся в job-local `sqlite`;
-- запись в `sqlite` идет bounded micro-batch'ами, а не по одному запросу на каждый токен;
-- на этапе экспорта собирать финальное строковое представление для третьего столбца.
+## MVP Limits
 
-### 5. Генерация XLSX в streaming-friendly стиле
+- максимальная длина текста в ячейке: `xlsx_cell_char_limit` (по умолчанию `32767`);
+- максимальное число data rows: `xlsx_max_data_rows` (по умолчанию `1_048_575`);
+- fail-fast по числу строк: если `line_count > 16_384`, job завершается с `xlsx_cell_limit`;
+- если `unique_lemma_count > xlsx_max_data_rows`, job завершается с `xlsx_row_limit`.
 
-Для экспорта планируется использовать `openpyxl` в `write_only` режиме.
+## Source Of Truth
 
-Это снижает накладные расходы при записи итогового файла и делает экспорт более устойчивым на больших наборах данных.
+- публичный статус job всегда читается из `job_repository`;
+- `Celery`/`AsyncResult` не используется как источник пользовательского статуса;
+- `api` и `worker` должны видеть один и тот же `shared_jobs_root` по одному и тому же абсолютному пути.
 
-В `v1` отчет пишется в один worksheet с header row. Это уменьшает доступный лимит строк под данные до `1_048_575`, но делает формат результата более ожидаемым для ревью и эксплуатации.
+## Error Codes
 
-## Ограничения и trade-offs
+Фиксированный список MVP `error_code`:
 
-### Ограничение формата `xlsx`
+- `queue_unavailable`
+- `unsupported_encoding`
+- `processing_timeout`
+- `xlsx_cell_limit`
+- `xlsx_row_limit`
+- `artifact_missing`
 
-У формата `xlsx` есть физические ограничения, которые важно честно учитывать.
+## Configuration
 
-Ключевая проблема в этом задании: третий столбец должен содержать counts по всем строкам документа в одной ячейке.
+Переменные окружения с префиксом `REPORT_EXPORT_`:
 
-При очень большом числе строк это может уткнуться в лимиты формата:
+- `SHARED_JOBS_ROOT` (default: `/tmp/report-export-shared-jobs`)
+- `MAX_UPLOAD_SIZE_BYTES` (default: `50 * 1024 * 1024`)
+- `READ_CHUNK_SIZE` (default: `1_048_576`)
+- `NORMALIZER_CACHE_SIZE` (default: `100_000`)
+- `STATS_BATCH_SIZE` (default: `10_000`)
+- `PROCESSING_TIMEOUT_SECONDS` (default: `600`)
+- `XLSX_CELL_CHAR_LIMIT` (default: `32767`)
+- `XLSX_MAX_DATA_ROWS` (default: `1_048_575`)
 
-- длина текста в ячейке ограничена;
-- число data rows ограничено `1_048_575`, потому что первая строка занята header row;
-- итоговая строка `"0,11,32,0,0,3,..."` может стать слишком длинной.
-
-Для MVP из этих ограничений следуют явные fail-fast правила:
-
-- если число строк документа больше `16_384`, job должна завершаться контролируемой ошибкой, потому что даже строка из одних `"0,0,0,..."` уже не поместится в ячейку `xlsx`;
-- если число уникальных лемм больше `1_048_575`, job должна завершаться контролируемой ошибкой, потому что `v1` пишет отчет в один worksheet с header row.
-
-Это ограничение не стоит игнорировать. Его нужно:
-
-- задокументировать;
-- валидировать;
-- либо аккуратно завершать задачу ошибкой,
-- либо явно описать альтернативный вариант, если он будет согласован.
-
-### Лемматизация не идеальна
-
-Морфологический анализ для естественного языка всегда содержит допущения.
-
-Нужно явно зафиксировать:
-
-- как обрабатывается `ё/е`;
-- что считать словом;
-- как вести себя с числами, сокращениями и латиницей.
-
-
-## План реализации
-
-Порядок разработки:
-
-1. Зафиксировать MVP-контракт и минимально необходимые `settings`.
-2. Реализовать persistent `job_repository` и lifecycle job.
-3. Реализовать `POST /public/report/export` с сохранением upload и публикацией в очередь.
-4. Реализовать tokenizer и normalizer с фиксированными правилами.
-5. Реализовать потоковую обработку файла и job-local `sqlite` для агрегатов.
-6. Реализовать `xlsx` writer в `openpyxl` `write_only` режиме.
-7. Добавить `status` и `download` endpoint'ы поверх `job_repository`.
-8. Покрыть MVP unit/integration тестами и выровнять README под фактический контракт.
-9. После MVP добавить hardening: shared runtime topology, admission control, heartbeat/reconcile, TTL/cleanup, load smoke.
-
-
-## Локальный запуск
-
-Финальная версия проекта будет ориентирована на запуск через `docker-compose`.
-
-Планируемый состав сервисов:
-
-- `api`
-- `worker`
-- `redis`
-
-После завершения реализации запуск будет выглядеть примерно так:
-
-```bash
-docker-compose up --build
-```
-
-Для локальной разработки без Docker будет поддерживаться запуск:
+## Local Run
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-и отдельный запуск worker:
+Worker:
 
 ```bash
-celery -A app.infrastructure.celery.app worker --loglevel=info
+celery -A app.infrastructure.celery_app worker --loglevel=info
 ```
 
-## Тестирование
+## Tests
 
-Планируется покрытие в двух слоях.
-
-Unit tests:
-
-- токенизация;
-- нормализация;
-- агрегация;
-- `job_repository` и atomic claim;
-- `sqlite`-backed stats storage;
-- запись `xlsx`.
-
-Integration tests:
-
-- успешная загрузка файла и создание job;
-- `413` на oversized upload с cleanup partial input;
-- `503` при неуспешной публикации в очередь;
-- обработка файла worker'ом;
-- проверка статуса;
-- скачивание результата;
-- controlled failure для неподдерживаемой кодировки и ограничений `xlsx`;
-- `404` для неизвестного `job_id`;
-- `409` для скачивания незавершенной job.
+- unit: tokenizer, normalizer, streaming aggregation, `job_repository`, sqlite stats storage, xlsx writer;
+- integration: submit/status/download contract, oversized upload (`413`), queue publish failure (`503`), full async flow, controlled processing failures, `404` unknown job, `409` download before completion.
