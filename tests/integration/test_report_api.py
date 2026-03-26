@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.core.settings import get_settings
 from app.domain.report.job_repository import JobStatus
-from app.infrastructure.job_repository import InMemoryJobRepository, get_job_repository
+from app.infrastructure.job_repository import SqliteJobRepository, get_job_repository
 from app.main import create_app
 
 
@@ -29,9 +27,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
         get_settings.cache_clear()
 
 
-def _repo() -> InMemoryJobRepository:
+def _repo() -> SqliteJobRepository:
     repo = get_job_repository()
-    assert isinstance(repo, InMemoryJobRepository)
+    assert isinstance(repo, SqliteJobRepository)
     return repo
 
 
@@ -82,17 +80,15 @@ def test_report_status_returns_queued_for_new_job(client: TestClient) -> None:
 def test_report_status_returns_failed_error_payload(client: TestClient) -> None:
     repo = _repo()
     job = repo.create_queued_job("job-failed")
-    now = datetime.now(timezone.utc)
+    claimed_job = repo.claim_queued_job(job.job_id)
+    assert claimed_job is not None
 
-    with repo._lock:
-        repo._jobs[job.job_id] = replace(
-            job,
-            status=JobStatus.failed,
-            updated_at=now,
-            finished_at=now,
-            error_code="queue_unavailable",
-            error_message="queue is unavailable",
-        )
+    failed_job = repo.mark_job_failed(
+        job.job_id,
+        error_code="queue_unavailable",
+        error_message="queue is unavailable",
+    )
+    assert failed_job is not None
 
     response = client.get(f"/public/report/{job.job_id}/status")
 
@@ -124,17 +120,18 @@ def test_download_returns_conflict_until_job_done(client: TestClient) -> None:
 def test_download_returns_file_for_done_job(client: TestClient) -> None:
     repo = _repo()
     job = repo.create_queued_job("job-done")
+    claimed_job = repo.claim_queued_job(job.job_id)
+    assert claimed_job is not None
+
     output_path = Path(job.output_path)
     output_path.write_bytes(b"fake-xlsx")
-    now = datetime.now(timezone.utc)
 
-    with repo._lock:
-        repo._jobs[job.job_id] = replace(
-            job,
-            status=JobStatus.done,
-            updated_at=now,
-            finished_at=now,
-        )
+    done_job = repo.mark_job_done(
+        job.job_id,
+        line_count=1,
+        unique_lemma_count=1,
+    )
+    assert done_job is not None
 
     response = client.get(f"/public/report/{job.job_id}/download")
 

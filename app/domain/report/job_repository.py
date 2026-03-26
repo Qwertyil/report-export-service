@@ -1,9 +1,4 @@
-"""Job repository interface and in-memory-compatible job model.
-
-Step 2 will replace the implementation with a persistent repository.
-For Step 1 we keep the contract minimal, so HTTP handlers don't depend on
-Celery AsyncResult payloads.
-"""
+"""Job repository interface and persisted job model."""
 
 from __future__ import annotations
 
@@ -45,5 +40,16 @@ class Job:
 class JobRepository(Protocol):
     def create_queued_job(self, job_id: str) -> Job: ...
 
-    def get_job(self, job_id: str) -> Job | None: ...
+    def claim_queued_job(self, job_id: str) -> Job | None: ...
 
+    def mark_job_done(self, job_id: str, *, line_count: int, unique_lemma_count: int) -> Job | None: ...
+
+    def mark_job_failed(
+        self,
+        job_id: str,
+        *,
+        error_code: str,
+        error_message: str | None = None,
+    ) -> Job | None: ...
+
+    def get_job(self, job_id: str) -> Job | None: ...
